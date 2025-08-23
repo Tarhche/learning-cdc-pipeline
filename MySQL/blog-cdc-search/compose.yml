@@ -1,0 +1,211 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: blog-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: blog
+      MYSQL_USER: bloguser
+      MYSQL_PASSWORD: blogpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./database/setup_maxwell.sql:/docker-entrypoint-initdb.d/setup_maxwell.sql
+      - ./database/my.cnf:/etc/mysql/conf.d/my.cnf
+    networks:
+      - blog-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+    command: --default-authentication-plugin=mysql_native_password
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    container_name: blog-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - blog-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      timeout: 20s
+      retries: 10
+
+  maxwell:
+    image: zendesk/maxwell:latest
+    container_name: blog-maxwell
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_USER: maxwell
+      MYSQL_PASSWORD: maxwell123
+      MYSQL_PORT: 3306
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: admin
+      RABBITMQ_PASSWORD: admin123
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - blog-network
+    restart: unless-stopped
+    command: >
+      bin/maxwell
+      --user=maxwell
+      --password=maxwell123
+      --host=mysql
+      --port=3306
+      --producer=rabbitmq
+      --rabbitmq_host=rabbitmq
+      --rabbitmq_port=5672
+      --rabbitmq_user=admin
+      --rabbitmq_pass=admin123
+      --rabbitmq_exchange=maxwell
+      --rabbitmq_exchange_type=fanout
+      --rabbitmq_exchange_durable=true
+      --rabbitmq_routing_key_template=%db%.%table%
+      --log_level=info
+      --bootstrapper=sync
+      --filter="exclude: *.*, include: blog.posts"
+
+  maxwell-bootstrap-initializer:
+    image: zendesk/maxwell:latest
+    container_name: blog-maxwell-bootstrap-initializer
+    command: >
+      bin/maxwell-bootstrap
+      --user=maxwell
+      --password=maxwell123
+      --host=mysql
+      --port=3306
+      --database=blog
+      --table=posts
+    depends_on:
+      mysql:
+        condition: service_healthy
+      maxwell:
+        condition: service_started
+    networks:
+      - blog-network
+    restart: "no"
+
+  typesense:
+    image: typesense/typesense:29.0
+    container_name: blog-typesense
+    ports:
+      - "8108:8108"
+    environment:
+      TYPESENSE_API_KEY: xyz
+      TYPESENSE_DATA_DIR: /data
+      TYPESENSE_ENABLE_CORS: "true"
+      TYPESENSE_LOG_LEVEL: "info"
+    volumes:
+      - typesense_data:/data
+    networks:
+      - blog-network
+    # healthcheck removed temporarily to debug startup issues
+    restart: unless-stopped
+
+  # MySQL Dashboard (phpMyAdmin)
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: blog-phpmyadmin
+    ports:
+      - "8081:80"
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: password
+      MYSQL_ROOT_PASSWORD: password
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - blog-network
+    restart: unless-stopped
+
+  # Typesense Dashboard
+  typesense-dashboard:
+    image: bfritscher/typesense-dashboard:2.1
+    container_name: blog-typesense-dashboard
+    ports:
+      - "8082:80"
+    volumes:
+      - ./typesense-config.json:/srv/config.json
+    depends_on:
+      - typesense
+    networks:
+      - blog-network
+    restart: unless-stopped
+
+  blog-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.blog
+    container_name: blog-app
+    ports:
+      - "8085:8085"
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: bloguser
+      DB_PASSWORD: blogpass
+      DB_NAME: blog
+      TYPESENSE_HOST: typesense
+      TYPESENSE_PORT: 8108
+      TYPESENSE_API_KEY: xyz
+      PORT: 8085
+    depends_on:
+      mysql:
+        condition: service_healthy
+      typesense:
+        condition: service_started
+    networks:
+      - blog-network
+    restart: unless-stopped
+
+  cdc-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.cdc
+    container_name: blog-cdc-service
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: admin
+      RABBITMQ_PASSWORD: admin123
+      RABBITMQ_VHOST: /
+      TYPESENSE_HOST: typesense
+      TYPESENSE_PORT: 8108
+      TYPESENSE_API_KEY: xyz
+      QUEUE_NAME: cdc-posts
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      typesense:
+        condition: service_started
+      maxwell:
+        condition: service_started
+    networks:
+      - blog-network
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  rabbitmq_data:
+  typesense_data:
+
+networks:
+  blog-network:
+    driver: bridge
