@@ -1,0 +1,193 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: blog-postgres
+    environment:
+      POSTGRES_ROOT_PASSWORD: password
+      POSTGRES_DB: blog
+      POSTGRES_USER: bloguser
+      POSTGRES_PASSWORD: blogpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./database/postgresql.conf:/etc/postgresql/postgresql.conf
+    networks:
+      - blog-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bloguser -d blog"]
+      timeout: 20s
+      retries: 10
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+
+  debezium-server:
+    image: debezium/server:3.0.0.Final
+    container_name: blog-debezium-server
+    ports:
+      - "8080:8080"
+    environment:
+      # postgres related configurations
+      DEBEZIUM_SOURCE_CONNECTOR_CLASS: io.debezium.connector.postgresql.PostgresConnector
+      DEBEZIUM_SOURCE_DATABASE_HOSTNAME: postgres
+      DEBEZIUM_SOURCE_DATABASE_PORT: 5432
+      DEBEZIUM_SOURCE_DATABASE_USER: bloguser
+      DEBEZIUM_SOURCE_DATABASE_PASSWORD: blogpass
+      DEBEZIUM_SOURCE_DATABASE_DBNAME: blog
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: blog
+      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: public
+      DEBEZIUM_SOURCE_PLUGIN_NAME: pgoutput
+      DEBEZIUM_SOURCE_SLOT_NAME: dbz_slot
+      DEBEZIUM_SOURCE_PUBLICATION_AUTOCREATE_MODE: filtered
+      DEBEZIUM_SOURCE_OFFSET_STORAGE_FILE_FILENAME: /tmp/offsets.dat
+      DEBEZIUM_SOURCE_OFFSET_FLUSH_INTERVAL_MS: 1000
+      # rabbitmq related configurations
+      DEBEZIUM_SINK_TYPE: rabbitmq
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_HOST: rabbitmq
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_PORT: 5672
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_USERNAME: admin
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_PASSWORD: admin123
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_VIRTUAL_HOST: /
+      DEBEZIUM_SINK_RABBITMQ_ACK_TIMEOUT: 30000
+      DEBEZIUM_SINK_RABBITMQ_EXCHANGE: debezium
+      DEBEZIUM_SINK_RABBITMQ_ROUTING_KEY: blog.posts
+      DEBEZIUM_SINK_RABBITMQ_AUTO_CREATE_ROUTING_KEY: true
+      DEBEZIUM_SINK_RABBITMQ_ROUTING_KEY_DURABLE: true
+    volumes:
+      - debezium_data:/tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      cdc-service:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - blog-network
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    container_name: blog-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+      RABBITMQ_DEFAULT_VHOST: /
+      RABBITMQ_DISABLE_GUEST: true
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - blog-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      timeout: 20s
+      retries: 10
+
+  typesense:
+    image: typesense/typesense:29.0
+    container_name: blog-typesense
+    ports:
+      - "8108:8108"
+    environment:
+      TYPESENSE_API_KEY: xyz
+      TYPESENSE_DATA_DIR: /data
+      TYPESENSE_ENABLE_CORS: "true"
+      TYPESENSE_LOG_LEVEL: "info"
+    volumes:
+      - typesense_data:/data
+    networks:
+      - blog-network
+    restart: unless-stopped
+
+  # PostgreSQL Dashboard (pgAdmin)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: blog-pgadmin
+    ports:
+      - "8081:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - blog-network
+    restart: unless-stopped
+
+  # Typesense Dashboard
+  typesense-dashboard:
+    image: bfritscher/typesense-dashboard:2.1
+    container_name: blog-typesense-dashboard
+    ports:
+      - "8082:80"
+    volumes:
+      - ./typesense-config.json:/srv/config.json
+    depends_on:
+      - typesense
+    networks:
+      - blog-network
+    restart: unless-stopped
+
+  blog-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.blog
+    container_name: blog-app
+    ports:
+      - "8085:8085"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: bloguser
+      DB_PASSWORD: blogpass
+      DB_NAME: blog
+      TYPESENSE_HOST: typesense
+      TYPESENSE_PORT: 8108
+      TYPESENSE_API_KEY: xyz
+      PORT: 8085
+    depends_on:
+      postgres:
+        condition: service_healthy
+      typesense:
+        condition: service_started
+    networks:
+      - blog-network
+    restart: unless-stopped
+
+  cdc-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.cdc
+    container_name: blog-cdc-service
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: admin
+      RABBITMQ_PASSWORD: admin123
+      RABBITMQ_VHOST: /
+      TYPESENSE_HOST: typesense
+      TYPESENSE_PORT: 8108
+      TYPESENSE_API_KEY: xyz
+      QUEUE_NAME: cdc-posts
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      typesense:
+        condition: service_started
+    networks:
+      - blog-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  typesense_data:
+  debezium_data:
+
+networks:
+  blog-network:
+    driver: bridge

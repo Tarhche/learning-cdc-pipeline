@@ -1,0 +1,35 @@
+{
+    "apiKey": "xyz",
+    "node": {
+      "host": "localhost",
+      "port": "8108",
+      "protocol": "http",
+      "path": "",
+      "tls": false
+    },
+    "ui": {
+      "hideProjectInfo": false
+    },
+    "history": [
+      {
+        "apiKey": "xyz",
+        "node": {
+          "host": "localhost",
+          "port": "8108",
+          "protocol": "http",
+          "path": "",
+          "tls": false
+        }
+      },
+      {
+        "apiKey": "xyz",
+        "node": {
+          "host": "localhost",
+          "port": "8108",
+          "protocol": "http",
+          "path": "",
+          "tls": false
+        }
+      }
+    ]
+  }
